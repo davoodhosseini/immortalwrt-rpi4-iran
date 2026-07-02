@@ -1,1 +1,115 @@
-name: Build
+name: Build ImmortalWrt RPi 4
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo apt-get -y purge azure-cli* docker* ghc* zulu* hhvm* llvm* firefox* google* dotnet* powershell* openjdk* mysql* php* mongodb* snap*
+          sudo apt-get -y autoremove --purge
+          sudo apt-get clean
+
+      - name: Install Build Dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt update
+          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+
+      - name: Clone ImmortalWrt
+        run: |
+          git clone --depth=1 https://github.com/immortalwrt/immortalwrt.git
+
+      - name: Add Passwall2 Feeds
+        run: |
+          cd immortalwrt
+          echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
+          echo "src-git passwall_luci https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
+
+      - name: Update and Install Feeds
+        run: |
+          cd immortalwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Add Custom Files
+        run: |
+          if [ -d "files" ]; then
+            cp -r files immortalwrt/files
+            echo "Custom files copied successfully."
+          fi
+
+      - name: Configure Firmware
+        run: |
+          cd immortalwrt
+          cat > .config <<EOF
+          CONFIG_TARGET_bcm27xx=y
+          CONFIG_TARGET_bcm27xx_bcm2711=y
+          CONFIG_TARGET_bcm27xx_bcm2711_DEVICE_rpi-4=y
+          EOF
+          
+          # Read and append packages from packages.txt
+          if [ -f "../packages.txt" ]; then
+            while IFS= read -r pkg; do
+              # Skip empty lines and comments
+              [[ -z "$pkg" || "$pkg" == \#* ]] && continue
+              echo "CONFIG_PACKAGE_$pkg=y" >> .config
+            done < ../packages.txt
+          fi
+          
+          make defconfig
+
+      - name: Download Sources
+        run: |
+          cd immortalwrt
+          make download -j8
+
+      - name: Build Firmware
+        run: |
+          cd immortalwrt
+          # Compile using all cores. If it fails, compile with 1 core and output detailed logs to identify the error.
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Prepare Artifacts & Tags
+        id: organize
+        run: |
+          cd immortalwrt
+          mkdir -p ../firmware
+          cp bin/targets/bcm27xx/bcm2711/* ../firmware/
+          cd ../firmware
+          echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+          echo "DATE=$(date +'%Y-%m-%d-%H%M')" >> $GITHUB_ENV
+
+      - name: Upload Firmware as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImmortalWrt-RPi4-${{ env.DATE }}
+          path: ${{ env.FIRMWARE_PATH }}/*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: RPi4-${{ env.DATE }}
+          name: ImmortalWrt RPi4 64-bit - ${{ env.DATE }}
+          files: ${{ env.FIRMWARE_PATH }}/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
